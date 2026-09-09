@@ -3,6 +3,206 @@
 Factual record of what changed per published version. Section references are
 to the Typed Standards specification unless noted otherwise.
 
+## 0.4.0 — 2026-09-04
+
+Minor: two optional input fields are added and no existing export is removed
+or retyped. `fallbackPortal` and `ProvenanceInput.portal`, inert since 0.3.1,
+are widened and deprecated rather than dropped — removing either is breaking
+and waits for a major.
+
+**What this release claims about golden bytes, and what it does not.** Every
+golden byte is unchanged — both vocabulary eras, all eight
+golden-reproduction cases, and `__fixtures__/website-golden.json`. That
+sentence has appeared in every release note since 0.3.0, and it is narrower
+than it reads: **`__fixtures__/reference-golden.json` carries no spans at
+all** — `spanId` and `scopeSpans` each occur zero times across its eight
+cases, whose traces are empty `resourceSpans` arrays or BlobRefs. So those
+eight cases are green for anything the tool-span loop does, including the
+rejection marker this release adds, and their green is not evidence about it.
+
+`website-golden.json` is the only golden fixture that exercises span-derived
+output: five tool-call activities and four data-response descriptions. It is
+the fixture that proves this release's byte-stability claim, and the one the
+conditional spread of `civic:failed` was measured against — driven red by
+making that spread unconditional, which moves it. Read
+[civic-ai-tools#199](https://github.com/npstorey/civic-ai-tools/issues/199)
+before citing a green golden suite as evidence about the graph builder.
+
+**The reader-facing source name is measured, not changed**
+([civic-ai-tools#194](https://github.com/npstorey/civic-ai-tools/issues/194),
+Wave N10 P-H3). Tests only: no exported behaviour changes, and every golden
+byte — both vocabulary eras, all eight golden-reproduction cases — is
+unchanged.
+
+- **The change #194 asks for moves frozen golden bytes.** A data response the
+  builder cannot describe by a portal is described by its source's registry
+  `agentTitle` (`Data response from Socrata MCP Server`) — the agent's title,
+  implementation language on a reader-facing surface. Reading the registry's
+  `displayName` instead — the reader-facing name, in the registry beside
+  `agentTitle` since the package's first release — is a one-expression change,
+  and it rewrites two lines inside `__fixtures__/website-golden.json`'s
+  captured graph: the data-commons and boston-opencontext data responses, both
+  on the agent-title branch. Three whole-graph byte-parity assertions read
+  those two lines. A golden fixture is never edited to match new behaviour, so
+  the change waits on a decision about whether those bytes move.
+- **The vocabulary era cannot carry it.** `CivicVocabulary` binds exactly two
+  literals — the `civic:` namespace and the id-scheme prefix
+  (`makeCivicVocabulary(ns, urnPrefix)`) — and both era suites assert the two
+  eras differ by those and by nothing else. A description's wording is neither
+  of them and is not era-scoped: the same prefix is emitted under both eras, so
+  gating it on the era would make prior-era reproduction and settlement-era
+  emission disagree about a reader's wording rather than about an identifier.
+- **Two instruments, both able to fail.** `provenance.test.ts` now pins the
+  agent node's `dcterms:title` to the registry `agentTitle` — those are signed
+  bytes in both golden fixtures and the one thing that does not move under
+  either decision — and names the two golden descriptions at stake, asserting
+  each reads by agent title today and *not* by display name. The sources they
+  drive all carry two distinct registry names, which is what makes the
+  assertions able to fail; a builder changed under either one turns it red.
+- **What holds still either way.** The portal branch
+  (`Data response from data.cityofnewyork.us`) and the unknown-source fallback
+  (`Data response from euro stat`, the raw source id) move under neither
+  decision.
+
+**The PROV-O activity for a rejected call says it was rejected**
+([civic-ai-tools#193](https://github.com/npstorey/civic-ai-tools/issues/193),
+Wave N10 P-H2). Additive: no existing export is removed or retyped, and every
+golden byte — both vocabulary eras, all eight golden-reproduction cases — is
+unchanged.
+
+- **Two new activity terms.** `CIVIC_TERM_FAILED` (`civic:failed`) and
+  `CIVIC_TERM_FAILURE_KIND` (`civic:failureKind`) are declared in
+  `src/format/vocabulary.ts` and exported from the package root. A `civic:`
+  property name is vocabulary as much as the namespace it hangs under, so the
+  capture-side builder imports them rather than spelling them; `purity.test.ts`
+  now lists both, which is what makes that a claim able to fail.
+- **`buildProvenanceGraph` reads the span's failure.** A tool span the producer
+  ended with the boolean `error: true` yields a tool-call activity carrying
+  `civic:failed: true`, and `civic:failureKind` with the span's `error.kind`
+  verbatim when it carried one. Previously the builder read nine `tool.*` /
+  `mcp.*` attributes and never asked about the outcome, so a call the source
+  REFUSED and one that answered were the same node with the same description —
+  and, a rejected call having no response hash, the absent data-response entity
+  was the only trace of the rejection in the graph. `error.kind` is the one
+  attribute name across this package and the reference producer.
+- **`error` is the assertion, `error.kind` only a label on one.** A span
+  carrying a kind and no assertion is not a rejection and yields neither key —
+  the posture `ToolCallSummary.failed` / `failureKind` already takes.
+- **A new boolean attribute reader.** The module's string attribute reader
+  returns `stringValue ?? intValue` and cannot see `boolValue` at all, so it
+  returned `undefined` for a span that really did record a rejection.
+  `getBoolAttr` is a separate, strictly-typed reader rather than a widening of
+  the string one: the nine attributes that reader serves are strings by
+  contract, and a truthiness test would read the string `"false"` as an
+  assertion of failure. Only the boolean `true` marks an activity.
+- **The description states no cause.** `dcterms:description` is byte-unchanged
+  — it states what the call WAS, and the marker states how it ended. The
+  classified kind is the only cause the graph will ever carry: the reference
+  producer stopped writing a rejection's raw text onto the span in this same
+  wave, and the builder does not read it back in one layer up.
+- **Byte consequence.** Both terms are spread conditionally and appended after
+  every key the activity already carried, exactly as `civic:durationMs` is. A
+  span that recorded no rejection yields the 0.3.1 key list in the 0.3.1 order,
+  and `civic:failed: false` is never emitted — a producer that stated "not
+  failed" and one that stated nothing must read the same, which is what makes a
+  marker that IS present mean something. A rejected span carries no
+  `tool.duration_ms` from the reference producer today
+  ([civic-ai-tools-website#413](https://github.com/npstorey/civic-ai-tools-website/issues/413)),
+  so `civic:durationMs` does not fire beside the two new keys.
+
+**A call the record states as failed asserts no access**
+([civic-ai-tools#192](https://github.com/npstorey/civic-ai-tools/issues/192),
+Wave N10 P-H1). Additive: no existing export is removed, no existing caller
+changes, and every golden byte — both vocabulary eras, all eight
+golden-reproduction cases — is unchanged.
+
+- **`ToolCallSummary` can see the rejection.** Two new OPTIONAL fields:
+  `failed?: boolean`, the producer's assertion that the source rejected this
+  call, and `failureKind?: string`, the producer's own open label for why.
+  The harness never interprets the label, and `buildDataSources` never reads
+  it — `failed` is the assertion, `failureKind` only a label on one. A
+  summary carrying neither is exactly the 0.3.1 shape, and absence means
+  "not recorded as failed", never "succeeded".
+- **`buildDataSources` mints nothing from a rejected call.** A call whose
+  summary carries `failed: true` contributes no dataset-keyed entry for the
+  dataset it never read, and marks no aggregate source accessed. Previously
+  the population could not see the failure at all, so a rejected call minted
+  its dataset's entry and, on an aggregate source, marked that source
+  accessed at a timestamp — inside the bytes a publisher signs. The rejected
+  call keeps its POSITION in the walk (calls pair to spans by index), and it
+  remains on the PROV-O graph's tool-call activities and in the caller's own
+  `queries[]`. A source with any non-rejected call is still accessed; a
+  dataset a successful call also read still gets its entry.
+- **The two inert inputs are marked deprecated, not removed.**
+  `buildDataSources`'s `fallbackPortal` — accepted and not consulted since
+  0.3.1 — now also accepts `undefined`, so a caller that has stopped
+  consulting it can stop supplying a value; it stays third of five positional
+  parameters, because dropping a positional parameter is breaking.
+  `ProvenanceInput.portal` becomes optional and carries `@deprecated`;
+  removing it outright would make the reference app's object literal an
+  excess-property error. Both removals wait for a major.
+- **Byte consequence.** A package built from a record that states no failure
+  is byte-identical to one built by 0.3.1 — the walk reaches the new branch
+  only when a summary carries `failed: true`. A package built from a record
+  that DOES state a failure loses the `dataSources` entries that failure
+  never earned; that is the defect being fixed, and the wave re-emits
+  nothing.
+- **Type-level gate.** `src/capture/data-sources.assert.ts` pins the shape at
+  compile time. `tsconfig.json` excludes `src/**/*.test.ts`, so the suite
+  type-checks nothing — a test can drive a field the type does not have and
+  `npm run typecheck` stays green.
+
+## 0.3.1 — 2026-09-02
+
+**The graph states what the span carried, and states absence as absence**
+([civic-ai-tools-website#384](https://github.com/npstorey/civic-ai-tools-website/issues/384),
+Wave N9 P-H1). Patch, not breaking: no existing export is removed or
+retyped, and every golden byte — both vocabulary eras, all eight
+golden-reproduction cases — is unchanged.
+
+- **`buildProvenanceGraph` no longer invents a tool name.** An
+  `mcp_tool_call` span with no `tool.name` yields a query entity with no
+  `civic:toolName` key (omitted, not placeholdered) and a tool-call activity
+  described as `MCP tool call (<operation type>)`. Previously the builder
+  substituted `get_data`.
+- **`buildProvenanceGraph` no longer attributes a data response to the run's
+  portal.** `civic:portalDomain` and `civic:datasetUrl` are emitted only when
+  the span carried both `tool.portal_domain` and `tool.dataset_id`. A
+  dataset-keyed span with no portal is described by its source agent's
+  registry title (`Data response from Socrata MCP Server`), the form
+  aggregate and unknown sources already took; a span with a dataset id and
+  no portal states `civic:datasetId` and mints no URL. Previously the builder
+  substituted `ProvenanceInput.portal` — the run's selected portal — which
+  attributed every `search` and `fetch` response to a portal the call never
+  addressed (the Socrata server's `search` and `fetch` take no portal and
+  answer from the portal that server is configured for). The graph does not
+  parse tool arguments: a portal embedded in a `fetch` id is not a portal the
+  span carried.
+- **`buildDataSources` no longer mints an entry on `fallbackPortal`.** A
+  dataset-keyed call whose arguments carry `dataset_id` but no `portal`
+  contributes no `dataSources` entry — `DataSourceEntry.portalUrl` is a
+  required string in produce-core, so an entry with no portal is not a shape
+  this package can emit — and the call remains on the graph's tool-call
+  activities. Calls that carry a portal (every `get_data` call from the
+  reference producer, whose loop injects the run portal before the record is
+  built) are unchanged.
+- **Unchanged signatures, two inputs now unused.** `ProvenanceInput.portal`
+  and the `fallbackPortal` parameter of `buildDataSources` keep their exact
+  types and positions, are accepted, and are not consulted; both say so at
+  the declaration.
+- **Byte consequence.** A package produced by this version from a trace
+  whose tool spans all carry `tool.name`, and carry `tool.portal_domain`
+  wherever they carry a response hash, is byte-identical to one produced by
+  0.3.0. Where a span carried less, the 0.3.0 output asserted a value the
+  span did not, and this version's output differs from it by exactly that
+  assertion. Packages already signed under 0.3.0 are untouched and remain
+  verifiable exactly as published.
+- **Dependency range widened, nothing resolved differently.**
+  `@typedstandards/produce-core` is accepted at `^0.3.0 || ^0.4.0` so a
+  consumer that takes produce-core 0.4.0 (an additive minor) resolves one
+  copy rather than nesting a second under this package. The lockfile here
+  still resolves 0.3.0.
+
 ## 0.3.0 — 2026-08-20
 
 **Settlement-era civic vocabulary + produce-core 0.3.0**

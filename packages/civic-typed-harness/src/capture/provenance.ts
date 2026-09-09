@@ -36,6 +36,8 @@ import type { OTelTrace, OTelAttribute } from './trace.ts';
 import {
   CIVIC_VOCABULARY,
   CIVICAITOOLS_PLATFORM_AGENT,
+  CIVIC_TERM_FAILED,
+  CIVIC_TERM_FAILURE_KIND,
   type CivicVocabulary,
   type PlatformAgentConfig,
 } from '../format/vocabulary.ts';
@@ -61,7 +63,17 @@ export interface ProvenanceInput {
    *  itself is exactly this value by construction. */
   outputHash?: string;
   model: string;
-  portal: string;
+  /** The run's selected portal. Accepted and NOT consulted by the graph
+   *  builder since 0.3.1: the graph states the portal a tool span carried
+   *  (`tool.portal_domain`) and states absence as absence — it never
+   *  substitutes the run's portal for one the call did not address.
+   *
+   *  @deprecated Inert since 0.3.1 and optional since 0.4.0 — a caller that
+   *  has stopped consulting it should stop passing it. The field stays in
+   *  the type so callers that do pass it (the reference app does, as an
+   *  object literal) keep compiling; removing it outright would make that
+   *  literal an excess-property error, so removal waits for a major. */
+  portal?: string;
 }
 
 /** Instance configuration for the graph build (config-not-constants). */
@@ -93,7 +105,9 @@ export interface ProvenanceConfig {
 }
 
 /** The civicaitools.org reference deployment's values. Passed explicitly by
- *  the reference app — never applied as a default. */
+ *  the reference app — never applied as a default, and never spread into
+ *  another instance's config, which would assert infrastructure that
+ *  instance doesn't run. */
 export const CIVICAITOOLS_PROVENANCE_CONFIG: ProvenanceConfig = {
   platformAgent: CIVICAITOOLS_PLATFORM_AGENT,
   sourceRegistry: CIVIC_SOURCE_REGISTRY,
@@ -105,6 +119,31 @@ export const CIVICAITOOLS_PROVENANCE_CONFIG: ProvenanceConfig = {
 function getAttr(attrs: OTelAttribute[], key: string): string | undefined {
   const attr = attrs.find(a => a.key === key);
   return attr?.value?.stringValue ?? attr?.value?.intValue ?? undefined;
+}
+
+/**
+ * Read an attribute the producer wrote as a BOOLEAN.
+ *
+ * `getAttr` above returns `stringValue ?? intValue` and cannot see the third
+ * OTel value shape at all — `TraceBuilder` encodes a boolean as
+ * `{ boolValue }` (trace.ts), so `getAttr(attrs, 'error')` returns `undefined`
+ * for a span the producer really did end with `error: true`. This is a
+ * separate reader rather than a widening of `getAttr` on purpose: the nine
+ * attributes `getAttr` serves are strings by contract and feed hashes,
+ * descriptions and `Number()`, and teaching it a fourth return shape would
+ * change what all nine yield for value shapes nobody has measured.
+ *
+ * The comparison is strict, and only `true` counts. A truthiness test over
+ * `stringValue` would read the string `"false"` as an assertion of failure —
+ * marking a call that ANSWERED as refused, inside bytes a publisher signs.
+ * The cost of the strictness is that a producer encoding this attribute as a
+ * string gets no marker; the reference producer does not, and under-reading a
+ * foreign encoding leaves the graph silent, where over-reading one would make
+ * it lie.
+ */
+function getBoolAttr(attrs: OTelAttribute[], key: string): boolean | undefined {
+  const attr = attrs.find(a => a.key === key);
+  return typeof attr?.value?.boolValue === 'boolean' ? attr.value.boolValue : undefined;
 }
 
 function nanoToIso(nano: string): string {
@@ -130,7 +169,8 @@ export function buildProvenanceGraph(
 ): ProvGraph {
   const otel = trace as unknown as OTelTrace;
   const spans = otel?.resourceSpans?.[0]?.scopeSpans?.[0]?.spans || [];
-  const { packageId, promptHash, promptText, outputText, model, portal } = input;
+  // `input.portal` is deliberately not read — see `ProvenanceInput.portal`.
+  const { packageId, promptHash, promptText, outputText, model } = input;
   const outputHash = input.outputHash ?? hash(outputText ?? '');
 
   const registry = config.sourceRegistry;
@@ -303,7 +343,22 @@ export function buildProvenanceGraph(
     );
   }
 
-  // MCP tool call spans
+  // MCP tool call spans.
+  //
+  // Every node derived from a span states what the span carried, and states
+  // absence as absence: a span with no `tool.name` yields nodes that name no
+  // tool, and a span with no `tool.portal_domain` yields a data response
+  // attributed to no portal. Nothing here substitutes the run's selected
+  // portal (`input.portal`, accepted and unused since 0.3.1) or a default
+  // tool name for a value the producer did not write. The reference
+  // producer's loop always writes `tool.name`, and writes
+  // `tool.portal_domain` only when the call's arguments carried a portal —
+  // which its portal injection does for `get_data` and for no other tool.
+  // The Socrata server's `search` (one argument, `query`) and `fetch` (one
+  // argument, `id`) address the portal that server is configured for, which
+  // the producer does not know. A `fetch` id may embed a portal, but that
+  // grammar belongs to the server: the graph does not parse arguments, so an
+  // id is never a portal the span carried.
   const dataResponseUrns: string[] = [];
 
   for (const span of toolSpans) {
@@ -311,10 +366,12 @@ export function buildProvenanceGraph(
     const argsStr = getAttr(span.attributes, 'tool.arguments') || '{}';
     const queryHash = hash(argsStr);
     const responseHash = getAttr(span.attributes, 'tool.response_hash');
-    const toolName = getAttr(span.attributes, 'tool.name') || 'get_data';
+    // Absent when the span carried none — never defaulted.
+    const toolName = getAttr(span.attributes, 'tool.name');
     const opType = getAttr(span.attributes, 'tool.operation_type') || 'unknown';
     const datasetId = getAttr(span.attributes, 'tool.dataset_id');
-    const portalDomain = getAttr(span.attributes, 'tool.portal_domain') || portal;
+    // Absent when the span carried none — never the run's portal.
+    const portalDomain = getAttr(span.attributes, 'tool.portal_domain');
     const toolSource = getAttr(span.attributes, 'mcp.source') || fallbackSourceId;
     const toolAgentUrn = agentUrnForSource(toolSource);
     const toolSourceDatasetKeyed = isDatasetKeyedSource(toolSource, registry);
@@ -330,7 +387,8 @@ export function buildProvenanceGraph(
     graph.push(
       makeEntityNode(queryUrn, {
         'civic:contentHash': `sha256:${queryHash}`,
-        'civic:toolName': toolName,
+        // Omitted — not placeholdered — when the span named no tool.
+        ...(toolName ? { 'civic:toolName': toolName } : {}),
         'civic:operationType': opType,
         'dcterms:description': `MCP tool arguments (${opType})`,
         ...(precedingInference
@@ -344,10 +402,20 @@ export function buildProvenanceGraph(
       const dataUrn = vocab.urn(packageId, 'data', responseHash);
       dataResponseUrns.push(dataUrn);
 
-      // Description varies by source — dataset-keyed sources (Socrata) have
-      // a portal domain; aggregate/unknown sources are described by their
-      // agent title.
-      const description = toolSourceDatasetKeyed
+      // Description: the portal the span carried, when it carried one;
+      // otherwise the agent that answered the call, by its registry title —
+      // the form aggregate and unknown sources already take. A dataset-keyed
+      // source whose span carried a dataset id but no portal takes the
+      // agent-title form too, with the dataset id stated below as
+      // `civic:datasetId` and no URL minted (a dataset URL needs a host the
+      // span did not carry). That branch is latent by construction for the
+      // reference producer — its loop injects the run portal into `get_data`
+      // arguments before the span opens (run-tool-loop.ts:799 at the time of
+      // writing), and `get_data` is the only tool whose arguments carry a
+      // dataset id — but any producer that writes `tool.dataset_id` without
+      // `tool.portal_domain` reaches it, so it is stated honestly rather
+      // than left dead.
+      const description = toolSourceDatasetKeyed && portalDomain
         ? `Data response from ${portalDomain}`
         : `Data response from ${sourceAgentMap[toolSource]?.title || toolSource}`;
 
@@ -360,12 +428,18 @@ export function buildProvenanceGraph(
           'civic:sourceId': toolSource,
           ...provWasGeneratedBy(toolCallUrn),
           // Croissant 1.1 placeholder — only meaningful for dataset-keyed
-          // sources today.
+          // sources today. The dataset id is stated whenever the span carried
+          // one; the portal and the dataset URL only when the span carried
+          // the portal as well. Key order is the byte contract.
           ...(toolSourceDatasetKeyed && datasetId
             ? {
                 'civic:datasetId': datasetId,
-                'civic:portalDomain': portalDomain,
-                'civic:datasetUrl': `https://${portalDomain}/d/${datasetId}`,
+                ...(portalDomain
+                  ? {
+                      'civic:portalDomain': portalDomain,
+                      'civic:datasetUrl': `https://${portalDomain}/d/${datasetId}`,
+                    }
+                  : {}),
                 'civic:croissantMetadataUrl': null, // hook for future Croissant integration
               }
             : {}),
@@ -378,9 +452,35 @@ export function buildProvenanceGraph(
     // the call. In multi-source analyses each call may target a different
     // agent (e.g. socrata for `get_data`, data-commons for `get_observations`).
     const durationMs = getAttr(span.attributes, 'tool.duration_ms');
+
+    // Did the SOURCE REFUSE this call? Before 0.4.0 the graph never asked, so
+    // a refused call and one that answered were the same node with the same
+    // description — the absence of a data-response entity was the only trace
+    // of the rejection, and absence stated as nothing is not absence stated.
+    //
+    // `error` is the ASSERTION and `error.kind` only a LABEL on one. A span
+    // carrying a kind and no assertion is not a rejection, so the kind is read
+    // and stated only inside the failure branch — the posture
+    // `ToolCallSummary.failed`/`failureKind` already takes on the other input.
+    // `error.kind` is the one attribute name across this package and the
+    // reference producer (Wave N10 D5); neither side invents a second.
+    //
+    // The kind is the ONLY cause this graph will ever state. The producer
+    // stopped writing a rejection's raw text onto the span in the same wave —
+    // that text is authored by the source, can name a host, a port or a stack
+    // frame, and the trace travels inline inside the bytes an instance signs.
+    // Reading it here would put it back one layer up; the classified vocabulary
+    // widens instead. Nor does the description change: it states what the call
+    // WAS, and the marker below states how it ended.
+    const failed = getBoolAttr(span.attributes, 'error');
+    const failureKind = failed === true ? getAttr(span.attributes, 'error.kind') : undefined;
+
     graph.push(
       makeActivityNode(toolCallUrn, {
-        'dcterms:description': `MCP tool call: ${toolName} (${opType})`,
+        // Names the tool only when the span did.
+        'dcterms:description': toolName
+          ? `MCP tool call: ${toolName} (${opType})`
+          : `MCP tool call (${opType})`,
         'civic:sourceId': toolSource,
         ...provUsed([queryUrn]),
         ...provWasAssociatedWith(toolAgentUrn),
@@ -391,6 +491,17 @@ export function buildProvenanceGraph(
           ? { 'prov:endedAtTime': xsdDateTime(nanoToIso(span.endTimeUnixNano)) }
           : {}),
         ...(durationMs ? { 'civic:durationMs': Number(durationMs) } : {}),
+        // Appended LAST and spread conditionally, exactly as `civic:durationMs`
+        // above is: a span that recorded no rejection yields the key list it
+        // yielded at 0.3.1, in the same order, and property insertion order is
+        // the legacy chain's byte contract. `false` is never emitted — a
+        // producer that stated "not failed" and one that stated nothing must
+        // read the same, which is what makes a marker that IS present mean
+        // something. A rejected span carries no `tool.duration_ms` from the
+        // reference producer today (civic-ai-tools-website#413), so
+        // `civic:durationMs` simply does not fire beside these two.
+        ...(failed === true ? { [CIVIC_TERM_FAILED]: true } : {}),
+        ...(failureKind ? { [CIVIC_TERM_FAILURE_KIND]: failureKind } : {}),
       }),
     );
   }

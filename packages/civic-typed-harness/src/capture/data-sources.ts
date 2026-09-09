@@ -30,6 +30,22 @@ export type { DataSourceEntry };
 export interface ToolCallSummary {
   name: string;
   args: Record<string, unknown>;
+  /** Did the producer record this call as REJECTED by the source? A call
+   *  recorded as failed asserts no access: it contributes no dataset-keyed
+   *  entry and marks no aggregate source accessed (see `buildDataSources`).
+   *
+   *  Optional, and absent is absent: a producer that records no outcome
+   *  passes neither this nor `failureKind`, and gets exactly the entries it
+   *  got before the fields existed. Absence means "not recorded as failed",
+   *  never "succeeded". Added 0.4.0. */
+  failed?: boolean;
+  /** The producer's own label for why the call was rejected, carried so a
+   *  caller can hand its record through unchanged. An open string with no
+   *  normative vocabulary: the harness never interprets it, and this module
+   *  never reads it. `failed` is the assertion and `failureKind` only a label
+   *  on one — a summary carrying a kind but no `failed` is not treated as a
+   *  rejection. Added 0.4.0. */
+  failureKind?: string;
 }
 
 interface TraceSpan {
@@ -94,18 +110,35 @@ export function resolveToolSource(
  * Build the per-source evidence-package `dataSources` array.
  *
  * Dataset-keyed sources (Socrata) contribute one entry per unique
- * `dataset_id` observed across tool calls. Aggregate sources (Data Commons,
+ * `dataset_id` observed across tool calls that also carried a `portal`
+ * argument; a dataset-keyed call that carried no portal contributes NO
+ * entry (the loop body says why). Aggregate sources (Data Commons,
  * Boston OpenContext — registry entries carrying `aggregatePortalUrl`)
  * contribute a single entry when any of their tool calls was made. Unknown
  * source ids contribute no entry. Each entry is tagged with `sourceId` so
  * downstream consumers can distinguish provenance. Emission order: the
  * dataset-keyed entries (first-seen order), then aggregate sources in
  * registry insertion order — matching the reference implementation.
+ *
+ * A call the producer recorded as FAILED (`ToolCallSummary.failed`) asserts
+ * no access and contributes nothing on either branch: no dataset-keyed entry
+ * for a dataset it never read, and no accessed-marking of its aggregate
+ * source. It keeps its POSITION in the walk, because calls are paired to
+ * spans by index. The call is still on the PROV-O graph's tool-call
+ * activities and in the caller's own `queries[]` — what it is not is an
+ * assertion, inside signed bytes, that a source was reached at a timestamp.
+ *
+ * @param fallbackPortal DEPRECATED, and inert since 0.3.1: an entry states
+ * the portal the call carried, never the run's. It stays third of five
+ * positional parameters so existing callers keep compiling, and since 0.4.0
+ * it also accepts `undefined`, which is what a caller that has stopped
+ * consulting it should pass. Dropping it is a breaking change and waits for
+ * a major.
  */
 export function buildDataSources(
   toolCalls: ToolCallSummary[],
   trace: Record<string, unknown>,
-  fallbackPortal: string,
+  fallbackPortal: string | undefined,
   now: string,
   options: DataSourceOptions = {},
 ): DataSourceEntry[] {
@@ -119,11 +152,28 @@ export function buildDataSources(
 
   for (let i = 0; i < toolCalls.length; i++) {
     const tc = toolCalls[i];
+    // A call the producer recorded as rejected reached no data, so it mints
+    // no entry on either branch below. The walk keeps its index rather than
+    // filtering the list: `resolveToolSource` pairs a call to `toolSpans[i]`,
+    // and a filtered list would shift every later call onto the wrong span.
+    if (tc.failed) continue;
     const source = resolveToolSource(tc, toolSpans[i], resolver, fallbackSourceId);
     if (isDatasetKeyedSource(source, registry)) {
       const datasetId = tc.args.dataset_id as string | undefined;
-      const portal = (tc.args.portal as string) || fallbackPortal;
-      if (datasetId) {
+      const portal = tc.args.portal as string | undefined;
+      // An entry is minted only from what the call carried: a dataset id AND
+      // a portal. A dataset-keyed call with a dataset id and no portal
+      // contributes no entry. `DataSourceEntry.portalUrl` is a required
+      // string (produce-core), so "an entry with no portal" is not a shape
+      // this package can emit; and substituting the run's portal
+      // (`fallbackPortal`, before 0.3.1) attributed the call to a portal it
+      // never addressed. Omission is the honest shape — the call is still on
+      // the PROV-O graph's tool-call activities, stated without a portal.
+      // The branch is latent for the reference producer, whose loop injects
+      // the run portal into `get_data` arguments before the record is built
+      // (run-tool-loop.ts:799 at the time of writing); any caller whose
+      // summary carries `dataset_id` without `portal` reaches it.
+      if (datasetId && portal) {
         let byDataset = datasetKeyed.get(source);
         if (!byDataset) {
           byDataset = new Map();
